@@ -18,7 +18,7 @@ try {
       serviceAccount = JSON.parse(serviceAccountJson);
     } catch (e) {
       throw new Error(
-        "Error parsing FIREBASE_SERVICE_ACCOUNT_JSON: " + e.message
+        "Error parsing FIREBASE_SERVICE_ACCOUNT_JSON: " + (e instanceof Error ? e.message : String(e))
       );
     }
 
