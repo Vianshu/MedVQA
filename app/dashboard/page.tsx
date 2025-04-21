@@ -48,6 +48,23 @@ export default function DashboardPage() {
   const [sidebarExpanded, setSidebarExpanded] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  const [ngrokUrl, setNgrokUrl] = useState("");
+  useEffect(() => {
+    console.log("Trying to fetch ngrok URL...");
+    fetch("/api/getNgrokUrl")
+      .then(res => res.json())
+      .then(data => {
+        if (data.url) {
+          setNgrokUrl(data.url);
+        } else {
+          console.log("Error:", data.error);
+        }
+      })
+      .catch(err => console.log("Failed to fetch ngrok URL", err));
+  }, []);
+  
+
 
   useEffect(() => {
     if (!isAuthenticated) router.push("/auth/login");
@@ -70,38 +87,146 @@ export default function DashboardPage() {
   const removeAttachment = (index: number) => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
-
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+  
+    // Validate at least one input exists
     if (!newMessage.trim() && attachments.length === 0) {
-      toast.warning("Message or attachment required");
+      toast.warning("Please enter a message or attach an image");
       return;
     }
-
-    const localAttachments: UploadedFile[] = attachments.map(file => ({
-      id: Date.now().toString() + Math.random().toString(),
-      fileName: file.name,
-      fileType: file.type,
-      url: URL.createObjectURL(file),
-    }));
-
-    const tempMessage: Message = {
+  
+    // Validate single image attachment
+    if (attachments.length > 1) {
+      toast.error("Only one image can be uploaded at a time");
+      return;
+    }
+  
+    // Create temporary user message
+    const userMessage: Message = {
       id: Date.now().toString(),
       chatId: activeChat,
       content: newMessage,
-      attachments: localAttachments,
+      attachments: attachments.map(file => ({
+        id: `${Date.now()}-${Math.random()}`,
+        fileName: file.name,
+        fileType: file.type,
+        url: URL.createObjectURL(file),
+      })),
       userId: user?.uid || "unknown",
       createdAt: new Date(),
       user: { 
         name: user?.displayName || "User", 
         avatar: user?.photoURL || undefined 
-      },
+      }
     };
-
-    setMessages(prev => [...prev, tempMessage]);
-    setNewMessage("");
-    setAttachments([]);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  
+    // Add user message immediately
+    setMessages(prev => [...prev, userMessage]);
+    // console.log("Ngrok URl", ngrokUrl);
+    try {
+      let base64Image = "";
+      // Process image if attached
+      if (attachments.length > 0) {
+        const file = attachments[0];
+        base64Image = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            resolve(result.split(',')[1]); // Remove data URL prefix
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+  
+      // Prepare payload
+      const payload = {
+        numpy_image: base64Image,
+        text: newMessage
+      };
+  
+      // Type definition for API response
+      interface InferenceResponse {
+        inferences: {
+          predicted_class: string;
+        };
+      }
+  
+      if (ngrokUrl) {
+        const response = await fetch(`${ngrokUrl}/upload-image/`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "ngrok-skip-browser-warning": "true",
+          },
+          body: JSON.stringify(payload),
+        });
+  
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+  
+        const responseData = await response.json() as InferenceResponse;
+  
+        // Validate response structure
+        if (!responseData?.inferences?.predicted_class) {
+          throw new Error("Invalid response format from API");
+        }
+  
+        // Create bot message
+        const botMessage: Message = {
+          id: Date.now().toString() + "-bot",
+          chatId: activeChat,
+          content: `Assistant: ${responseData.inferences.predicted_class}`,
+          attachments: [],
+          userId: "bot",
+          createdAt: new Date(),
+          user: {
+            name: "Med-VQA+ Assistant",
+            avatar: "/bot-avatar.png"
+          }
+        };
+  
+        // Add bot message and clear inputs
+        setMessages(prev => [...prev, botMessage]);
+        setNewMessage("");
+        setAttachments([]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+  
+        // Scroll to bottom
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      
+      // Cleanup object URLs
+      userMessage.attachments.forEach(attachment => {
+        URL.revokeObjectURL(attachment.url);
+      });
+  
+      // Remove user message
+      setMessages(prev => prev.filter(msg => msg.id !== userMessage.id));
+  
+      // Show error message
+      const errorMessage: Message = {
+        id: Date.now().toString() + "-error",
+        chatId: activeChat,
+        content: "Error: Failed to get response",
+        attachments: [],
+        userId: "bot",
+        createdAt: new Date(),
+        user: {
+          name: "System",
+          avatar: "/error-icon.png"
+        }
+      };
+  
+      setMessages(prev => [...prev, errorMessage]);
+      toast.error("Failed to process request");
+    }
   };
 
   const createNewChat = () => {
